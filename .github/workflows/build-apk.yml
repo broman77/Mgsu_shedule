@@ -1,0 +1,105 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      - name: Download official MGSU brand assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/res/drawable-nodpi
+          curl -L --fail --retry 3 --retry-delay 2 \
+            "https://api-loft.mgsu.ru/storage/files/1/9/3/193.png" \
+            -o app/src/main/res/drawable-nodpi/official_mgsu_logo.png
+          curl -L --fail --retry 3 --retry-delay 2 \
+            "https://static.tildacdn.com/tild3331-3463-4438-a238-316631623739/__.jpg" \
+            -o app/src/main/res/drawable-nodpi/official_campus.jpg
+          test -s app/src/main/res/drawable-nodpi/official_mgsu_logo.png
+          test -s app/src/main/res/drawable-nodpi/official_campus.jpg
+
+      - name: Create launcher icons from official MGSU logo
+        shell: bash
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image
+          from pathlib import Path
+          root = Path('app/src/main/res')
+          logo = Image.open(root/'drawable-nodpi'/'official_mgsu_logo.png').convert('RGBA')
+          sizes = {
+              'mipmap-mdpi': 48,
+              'mipmap-hdpi': 72,
+              'mipmap-xhdpi': 96,
+              'mipmap-xxhdpi': 144,
+              'mipmap-xxxhdpi': 192,
+          }
+          for folder, size in sizes.items():
+              target_dir = root/folder
+              target_dir.mkdir(parents=True, exist_ok=True)
+              canvas = Image.new('RGBA', (size, size), (255,255,255,255))
+              copy = logo.copy()
+              copy.thumbnail((int(size*0.80), int(size*0.80)), Image.Resampling.LANCZOS)
+              canvas.alpha_composite(copy, ((size-copy.width)//2, (size-copy.height)//2))
+              canvas.convert('RGB').save(target_dir/'ic_launcher.png', quality=95)
+          PY
+
+      - name: Compile Kotlin
+        id: compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle :app:compileDebugKotlin --stacktrace --console=plain --no-daemon 2>&1 | tee compile.log
+
+      - name: Upload compiler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-log
+          path: compile.log
+          if-no-files-found: ignore
+
+      - name: Stop on compiler error
+        if: steps.compile.outcome == 'failure'
+        run: exit 1
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace --console=plain --no-daemon 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MGSU-Schedule-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
