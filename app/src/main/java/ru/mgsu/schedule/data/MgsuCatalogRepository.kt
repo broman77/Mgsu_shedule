@@ -17,11 +17,13 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
- * Builds a local index from the official MGSU lesson/exam PDFs.
+ * Builds the student timetable catalog from the official MGSU download page.
  *
- * Version 5 stores not only autocomplete values but also teacher/group -> PDF mappings. This is
- * important: after the first launch the application does not have to guess a PDF from its file
- * name and does not silently miss schedules whose filenames are abbreviated.
+ * The previous implementation downloaded and text-indexed up to 260 PDFs on first launch just to
+ * discover every group and teacher. Apart from being slow on a phone, that made the app fail when
+ * a single semester contained an unusual PDF. Version 6 keeps discovery cheap: first we index the
+ * links on the official HTML page; only after the student selects institute/course do we download
+ * the small matching subset and extract concrete groups from those PDFs.
  */
 class MgsuCatalogRepository(private val context: Context) {
     private val store = AppStore(context)
@@ -40,87 +42,116 @@ class MgsuCatalogRepository(private val context: Context) {
 
     fun cached(): SuggestionCatalog = mergeWithSchedule(sanitizeCatalog(store.readCatalog()))
 
+    /** Refreshes only the official page index. No timetable PDFs are downloaded here. */
     suspend fun refresh(force: Boolean = false): SuggestionCatalog = withContext(Dispatchers.IO) {
-        val current = mergeWithSchedule(sanitizeCatalog(store.readCatalog()))
+        val current = sanitizeCatalog(store.readCatalog())
         val fresh = current.updatedAtMillis > 0L &&
-            System.currentTimeMillis() - current.updatedAtMillis < 24L * 60L * 60L * 1000L &&
-            current.teachers.isNotEmpty() && current.groups.isNotEmpty() &&
-            (current.teacherSources.isNotEmpty() || current.groupSources.isNotEmpty())
+            System.currentTimeMillis() - current.updatedAtMillis < INDEX_TTL_MS &&
+            current.sourceLabels.isNotEmpty()
         if (!force && fresh) return@withContext current
 
         if (force) {
-            // A forced bootstrap must not reuse timetable PDFs from an older semester/version.
             runCatching { File(context.cacheDir, "mgsu_catalog_pdf").deleteRecursively() }
         }
 
         val sources = discoverAll()
         if (sources.isEmpty()) {
-            if (current.teachers.isEmpty() && current.groups.isEmpty()) {
-                throw IllegalStateException("Не удалось получить список официальных файлов расписания НИУ МГСУ")
-            }
-            return@withContext current
+            if (current.sourceLabels.isNotEmpty()) return@withContext current
+            throw IllegalStateException("Не удалось получить список официальных файлов расписания НИУ МГСУ")
         }
 
-        val teachers = linkedSetOf<String>()
-        teachers += current.teachers
-        val groups = linkedSetOf<String>()
-        groups += current.groups
+        val catalog = current.copy(
+            schemaVersion = CATALOG_SCHEMA,
+            teachers = emptyList(),
+            teacherSources = emptyMap(),
+            sourceLabels = sources.associate { it.url to it.label },
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        store.writeCatalog(catalog)
+        catalog
+    }
 
-        val teacherSources = current.teacherSources
-            .mapValues { (_, urls) -> urls.toMutableSet() }
-            .toMutableMap()
-        val groupSources = current.groupSources
-            .mapValues { (_, urls) -> urls.toMutableSet() }
-            .toMutableMap()
-        val labels = current.sourceLabels.toMutableMap()
+    /**
+     * Loads concrete groups only for the selected institute/course. In normal semesters this means
+     * one or a few PDFs instead of hundreds of files for the whole university.
+     */
+    suspend fun refreshGroups(
+        institute: String,
+        course: Int,
+        force: Boolean = false
+    ): SuggestionCatalog = withContext(Dispatchers.IO) {
+        require(course in 1..6) { "Некорректный курс" }
 
-        // Filenames/labels sometimes already expose a group, so index these immediately.
-        sources.forEach { src ->
-            labels[src.url] = src.label
-            ScheduleParsingRules.extractGroups(src.label + " " + src.url).forEach { group ->
-                groups += group
-                groupSources.getOrPut(group) { linkedSetOf() }.add(src.url)
-            }
+        var base = refresh(force = force)
+        val known = groupsFor(base, institute, course)
+        val groupIndexFresh = !force && known.isNotEmpty() && known.any { base.groupSources[it].orEmpty().isNotEmpty() }
+        if (groupIndexFresh) return@withContext base
+
+        var sources = sourcesFrom(base)
+            .filter { MgsuSourceRules.matchesStudentSelection(it.url, it.label, institute, course) }
+            .sortedWith(compareBy<Source> { MgsuSourceRules.sourcePriority(it.url, it.label) }.thenBy { it.label })
+
+        // The public page may have changed since the cached index was written. Refresh once before
+        // reporting that no matching institute/course exists.
+        if (sources.isEmpty() && !force) {
+            base = refresh(force = true)
+            sources = sourcesFrom(base)
+                .filter { MgsuSourceRules.matchesStudentSelection(it.url, it.label, institute, course) }
+                .sortedWith(compareBy<Source> { MgsuSourceRules.sourcePriority(it.url, it.label) }.thenBy { it.label })
+        }
+        if (sources.isEmpty()) {
+            throw IllegalStateException("На странице МГСУ не найдены файлы для $institute, $course курса")
         }
 
-        var successfulPdfs = 0
-        for (source in sources.take(MAX_SCAN_PDFS)) {
+        val foundGroups = linkedSetOf<String>()
+        val foundSources = linkedMapOf<String, MutableSet<String>>()
+        var readablePdfs = 0
+
+        // Prefer ordinary lesson/exam timetables; practice documents are only a last resort.
+        // Do not stop after the first PDF: MGSU can split one course into a main file plus
+        // separate group ranges (for example 40-43/50/51/80/81). We still stay scoped to the
+        // selected institute/course, so this remains far smaller than the old 260-PDF scan.
+        val preferred = sources.filterNot { MgsuSourceRules.isPracticeSource(it.url, it.label) }
+            .distinctBy { MgsuSourceRules.canonicalPath(it.url) }
+        val practice = sources.filter { MgsuSourceRules.isPracticeSource(it.url, it.label) }
+            .distinctBy { MgsuSourceRules.canonicalPath(it.url) }
+        val candidates = if (preferred.isNotEmpty()) preferred else practice
+
+        for (source in candidates.take(MAX_GROUP_SCAN_PDFS)) {
             runCatching {
-                val file = downloadCached(source.url)
-                val text = PDDocument.load(file).use { PDFTextStripper().apply { sortByPosition = true }.getText(it) }
-                val foundTeachers = ScheduleParsingRules.extractTeachers(text)
-                val foundGroups = ScheduleParsingRules.extractGroups(text)
-                foundTeachers.forEach { teacher ->
-                    val canonical = ScheduleParsingRules.canonicalTeacher(teacher) ?: return@forEach
-                    teachers += canonical
-                    teacherSources.getOrPut(canonical) { linkedSetOf() }.add(source.url)
+                val file = downloadCached(source.url, force)
+                val text = PDDocument.load(file).use { doc ->
+                    PDFTextStripper().apply { sortByPosition = true }.getText(doc)
                 }
-                foundGroups.forEach { group ->
-                    val canonical = ScheduleParsingRules.canonicalGroup(group) ?: return@forEach
-                    groups += canonical
-                    groupSources.getOrPut(canonical) { linkedSetOf() }.add(source.url)
+                readablePdfs++
+                ScheduleParsingRules.extractGroups(text).forEach { raw ->
+                    val group = ScheduleParsingRules.canonicalGroup(raw) ?: return@forEach
+                    if (!ScheduleParsingRules.groupInstitute(group).equals(institute, ignoreCase = true)) return@forEach
+                    if (ScheduleParsingRules.groupCourse(group) != course) return@forEach
+                    foundGroups += group
+                    foundSources.getOrPut(group) { linkedSetOf() }.add(source.url)
                 }
-                successfulPdfs++
             }
+
         }
 
-        if (successfulPdfs == 0 && current.teachers.isEmpty() && current.groups.isEmpty()) {
-            throw IllegalStateException("Файлы МГСУ найдены, но ни один PDF не удалось прочитать")
+        if (foundGroups.isEmpty()) {
+            if (known.isNotEmpty()) return@withContext base
+            val suffix = if (readablePdfs == 0) "Файлы найдены, но скачать PDF не удалось." else "PDF прочитаны, но группы не распознаны."
+            throw IllegalStateException("Не удалось получить группы $institute, $course курса. $suffix")
         }
 
-        val catalog = SuggestionCatalog(
-            schemaVersion = 5,
-            teachers = teachers.mapNotNull(ScheduleParsingRules::canonicalTeacher).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER),
-            groups = groups.mapNotNull(ScheduleParsingRules::canonicalGroup).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER),
-            teacherSources = teacherSources.mapNotNull { (k, urls) ->
-                val canonical = ScheduleParsingRules.canonicalTeacher(k) ?: return@mapNotNull null
-                canonical to urls.filter(::isOfficialUrl).distinctBy(::canonicalPath)
-            }.toMap(),
-            groupSources = groupSources.mapNotNull { (k, urls) ->
-                val canonical = ScheduleParsingRules.canonicalGroup(k) ?: return@mapNotNull null
-                canonical to urls.filter(::isOfficialUrl).distinctBy(::canonicalPath)
-            }.toMap(),
-            sourceLabels = labels.filterKeys(::isOfficialUrl),
+        val keepGroups = base.groups.filterNot { isSameSelection(it, institute, course) }
+        val keepSources = base.groupSources.filterKeys { !isSameSelection(it, institute, course) }
+        val mergedSources = keepSources.toMutableMap().apply {
+            foundSources.forEach { (group, urls) -> put(group, urls.distinctBy(MgsuSourceRules::canonicalPath)) }
+        }
+        val catalog = base.copy(
+            schemaVersion = CATALOG_SCHEMA,
+            teachers = emptyList(),
+            groups = (keepGroups + foundGroups).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER),
+            teacherSources = emptyMap(),
+            groupSources = mergedSources,
             updatedAtMillis = System.currentTimeMillis()
         )
         store.writeCatalog(catalog)
@@ -129,11 +160,14 @@ class MgsuCatalogRepository(private val context: Context) {
 
     fun mergeFromSchedule(cache: CachedSchedule): SuggestionCatalog {
         val old = sanitizeCatalog(store.readCatalog())
-        val teachers = (old.teachers + cache.events.mapNotNull { ScheduleParsingRules.canonicalTeacher(it.teacher) })
-            .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
         val groups = (old.groups + cache.events.mapNotNull { ScheduleParsingRules.canonicalGroup(it.group) })
             .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
-        val merged = old.copy(schemaVersion = 5, teachers = teachers, groups = groups)
+        val merged = old.copy(
+            schemaVersion = CATALOG_SCHEMA,
+            teachers = emptyList(),
+            groups = groups,
+            teacherSources = emptyMap()
+        )
         store.writeCatalog(merged)
         return merged
     }
@@ -143,73 +177,89 @@ class MgsuCatalogRepository(private val context: Context) {
         val cache = store.readCache()
         if (cache.events.isEmpty()) return cleanBase
         return cleanBase.copy(
-            schemaVersion = 5,
-            teachers = (cleanBase.teachers + cache.events.mapNotNull { ScheduleParsingRules.canonicalTeacher(it.teacher) })
-                .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER),
+            schemaVersion = CATALOG_SCHEMA,
+            teachers = emptyList(),
             groups = (cleanBase.groups + cache.events.mapNotNull { ScheduleParsingRules.canonicalGroup(it.group) })
-                .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+                .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER),
+            teacherSources = emptyMap()
         )
     }
 
     private fun sanitizeCatalog(value: SuggestionCatalog): SuggestionCatalog {
-        if (value.schemaVersion < 5) return SuggestionCatalog(schemaVersion = 5)
-        val teachers = value.teachers.filter(ScheduleParsingRules::isValidTeacher)
-            .mapNotNull(ScheduleParsingRules::canonicalTeacher).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+        if (value.schemaVersion < CATALOG_SCHEMA) return SuggestionCatalog(schemaVersion = CATALOG_SCHEMA)
         val groups = value.groups.filter(ScheduleParsingRules::isValidGroup)
-            .mapNotNull(ScheduleParsingRules::canonicalGroup).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
-        val validTeachers = teachers.toSet()
+            .mapNotNull(ScheduleParsingRules::canonicalGroup)
+            .distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
         val validGroups = groups.toSet()
         return value.copy(
-            schemaVersion = 5,
-            teachers = teachers,
+            schemaVersion = CATALOG_SCHEMA,
+            teachers = emptyList(),
             groups = groups,
-            teacherSources = value.teacherSources.mapNotNull { (key, urls) ->
-                val canonical = ScheduleParsingRules.canonicalTeacher(key) ?: return@mapNotNull null
-                if (canonical !in validTeachers) return@mapNotNull null
-                canonical to urls.filter(::isOfficialUrl).distinctBy(::canonicalPath)
-            }.toMap(),
+            teacherSources = emptyMap(),
             groupSources = value.groupSources.mapNotNull { (key, urls) ->
                 val canonical = ScheduleParsingRules.canonicalGroup(key) ?: return@mapNotNull null
                 if (canonical !in validGroups) return@mapNotNull null
-                canonical to urls.filter(::isOfficialUrl).distinctBy(::canonicalPath)
+                canonical to urls.filter(MgsuSourceRules::isOfficialUrl).distinctBy(MgsuSourceRules::canonicalPath)
             }.toMap(),
-            sourceLabels = value.sourceLabels.filterKeys(::isOfficialUrl)
+            sourceLabels = value.sourceLabels.filterKeys(MgsuSourceRules::isOfficialUrl)
         )
     }
 
+    private fun groupsFor(catalog: SuggestionCatalog, institute: String, course: Int): List<String> =
+        catalog.groups.filter { isSameSelection(it, institute, course) }
+
+    private fun isSameSelection(group: String, institute: String, course: Int): Boolean =
+        ScheduleParsingRules.groupInstitute(group).equals(institute, ignoreCase = true) &&
+            ScheduleParsingRules.groupCourse(group) == course
+
     private data class Source(val url: String, val label: String)
 
+    private fun sourcesFrom(catalog: SuggestionCatalog): List<Source> =
+        catalog.sourceLabels.map { (url, label) -> Source(url, label) }
+
     private suspend fun discoverAll(): List<Source> {
-        val out = mutableListOf<Source>()
-        for ((path, kind) in listOf(lessonsPath to "Занятия", examsPath to "Экзамены")) {
-            for (host in hosts) {
-                val url = "https://$host$path"
-                val found = runCatching { discover(url, kind) }.getOrDefault(emptyList())
-                out += found
-                // A successful official host is enough for this section; mirrors contain the same PDFs.
-                if (found.isNotEmpty()) break
-            }
+        val lessons = discoverFirstAvailable(lessonsPath, "Занятия")
+        if (lessons.isEmpty()) return emptyList()
+
+        val out = lessons.toMutableList()
+        // The main download page currently also contains session sections. Only query the legacy
+        // separate exam page when it adds information, and never make it a requirement.
+        if (out.none { it.label.startsWith("Экзамены") }) {
+            out += discoverFirstAvailable(examsPath, "Экзамены")
         }
-        return out.distinctBy { canonicalPath(it.url) }
+        return out.distinctBy { MgsuSourceRules.canonicalPath(it.url) }
     }
 
-    private suspend fun discover(pageUrl: String, kind: String): List<Source> {
+    private suspend fun discoverFirstAvailable(path: String, kind: String): List<Source> {
+        for (host in hosts) {
+            val pageUrl = "https://$host$path"
+            val found = runCatching { discover(pageUrl, kind) }.getOrDefault(emptyList())
+            if (found.isNotEmpty()) return found
+        }
+        return emptyList()
+    }
+
+    private suspend fun discover(pageUrl: String, defaultKind: String): List<Source> {
         executeWithRetry(pageUrl, "https://mgsu.ru/").use { response ->
             val html = response.body?.string().orEmpty()
             if (html.isBlank()) return emptyList()
             val doc = Jsoup.parse(html, pageUrl)
             return doc.select("a[href]").mapNotNull { a ->
-                val href = normalizeOfficialUrl(a.absUrl("href"))
-                if (!href.substringBefore('?').endsWith(".pdf", ignoreCase = true) || !isOfficialUrl(href)) null
-                else Source(href, "$kind · ${a.text().ifBlank { href.substringAfterLast('/') }}")
+                val href = MgsuSourceRules.normalizeOfficialUrl(a.absUrl("href"))
+                if (!href.substringBefore('?').endsWith(".pdf", ignoreCase = true) || !MgsuSourceRules.isOfficialUrl(href)) {
+                    return@mapNotNull null
+                }
+                val anchor = a.text().ifBlank { href.substringAfterLast('/') }
+                val kind = MgsuSourceRules.classifyKind(href, anchor, defaultKind)
+                Source(href, "$kind · $anchor")
             }
         }
     }
 
-    private suspend fun downloadCached(url: String): File {
+    private suspend fun downloadCached(url: String, force: Boolean): File {
         val dir = File(context.cacheDir, "mgsu_catalog_pdf").apply { mkdirs() }
-        val file = File(dir, sha1(canonicalPath(url)) + ".pdf")
-        if (file.exists() && file.length() > 1024L) return file
+        val file = File(dir, sha1(MgsuSourceRules.canonicalPath(url)) + ".pdf")
+        if (!force && file.exists() && file.length() > 1024L) return file
 
         var last: Throwable? = null
         for (candidate in alternateUrls(url)) {
@@ -220,7 +270,9 @@ class MgsuCatalogRepository(private val context: Context) {
                     file.writeBytes(bytes)
                     return file
                 }
-            } catch (t: Throwable) { last = t }
+            } catch (t: Throwable) {
+                last = t
+            }
         }
         throw last ?: IllegalStateException("Не удалось скачать PDF")
     }
@@ -240,7 +292,9 @@ class MgsuCatalogRepository(private val context: Context) {
                 val code = response.code
                 response.close()
                 last = IllegalStateException("HTTP $code")
-            } catch (t: Throwable) { last = t }
+            } catch (t: Throwable) {
+                last = t
+            }
             if (attempt < 2) delay(700L * (attempt + 1))
         }
         throw last ?: IllegalStateException("Ошибка сети")
@@ -255,26 +309,6 @@ class MgsuCatalogRepository(private val context: Context) {
         }
     }
 
-    private fun isOfficialUrl(url: String): Boolean = runCatching {
-        val host = URI(url).host?.lowercase().orEmpty()
-        host == "mgsu.ru" || host.endsWith(".mgsu.ru")
-    }.getOrDefault(false)
-
-    private fun normalizeOfficialUrl(url: String): String {
-        val uri = runCatching { URI(url) }.getOrNull() ?: return url
-        val host = uri.host?.lowercase().orEmpty()
-        if (!(host == "mgsu.ru" || host.endsWith(".mgsu.ru"))) return url
-        if (uri.scheme.equals("https", true)) return url
-        return runCatching {
-            URI("https", uri.userInfo, uri.host, uri.port, uri.path, uri.query, uri.fragment).toString()
-        }.getOrDefault(url)
-    }
-
-    private fun canonicalPath(url: String): String {
-        val uri = runCatching { URI(url) }.getOrNull() ?: return url
-        return (uri.path ?: url) + (uri.query?.let { "?$it" } ?: "")
-    }
-
     private fun looksLikePdf(bytes: ByteArray): Boolean = bytes.size > 5 &&
         bytes[0] == '%'.code.toByte() && bytes[1] == 'P'.code.toByte() &&
         bytes[2] == 'D'.code.toByte() && bytes[3] == 'F'.code.toByte()
@@ -283,7 +317,9 @@ class MgsuCatalogRepository(private val context: Context) {
         .digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 
     companion object {
-        private const val MAX_SCAN_PDFS = 260
+        private const val CATALOG_SCHEMA = 6
+        private const val MAX_GROUP_SCAN_PDFS = 24
+        private const val INDEX_TTL_MS = 6L * 60L * 60L * 1000L
         private const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 16; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
     }
 }

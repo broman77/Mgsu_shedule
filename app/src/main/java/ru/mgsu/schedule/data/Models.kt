@@ -92,7 +92,7 @@ data class ScheduleChange(
 
 @Serializable
 data class SuggestionCatalog(
-    val schemaVersion: Int = 5,
+    val schemaVersion: Int = 6,
     val teachers: List<String> = emptyList(),
     val groups: List<String> = emptyList(),
     /** Canonical teacher -> official PDF URLs containing that teacher. */
