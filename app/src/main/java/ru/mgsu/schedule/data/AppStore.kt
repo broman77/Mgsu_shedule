@@ -283,24 +283,20 @@ class AppStore(private val context: Context) {
     }
 
     companion object {
-        const val CURRENT_PARSER_VERSION = 5
+        const val CURRENT_PARSER_VERSION = 6
 
-        fun validProfile(profile: UserProfile): Boolean = when (profile.role) {
-            UserRole.STUDENT -> ScheduleParsingRules.isValidGroup(profile.group)
-            UserRole.TEACHER -> ScheduleParsingRules.isValidTeacher(profile.teacher)
-        }
+        fun validProfile(profile: UserProfile): Boolean =
+            profile.role == UserRole.STUDENT && ScheduleParsingRules.isValidGroup(profile.group)
 
-        fun normalizeProfile(profile: UserProfile): UserProfile = when (profile.role) {
-            UserRole.STUDENT -> profile.copy(group = ScheduleParsingRules.canonicalGroup(profile.group).orEmpty(), teacher = "")
-            UserRole.TEACHER -> profile.copy(teacher = ScheduleParsingRules.canonicalTeacher(profile.teacher).orEmpty(), group = "")
-        }
+        fun normalizeProfile(profile: UserProfile): UserProfile = profile.copy(
+            role = UserRole.STUDENT,
+            group = ScheduleParsingRules.canonicalGroup(profile.group).orEmpty(),
+            teacher = ""
+        )
 
         fun profileDisplayName(profile: UserProfile): String {
             val normalized = normalizeProfile(profile)
-            return when (normalized.role) {
-                UserRole.STUDENT -> normalized.group.ifBlank { "${normalized.institute}, ${normalized.course} курс" }
-                UserRole.TEACHER -> normalized.teacher.ifBlank { "Преподаватель" }
-            }
+            return normalized.group.ifBlank { "${normalized.institute}, ${normalized.course} курс" }
         }
     }
 }

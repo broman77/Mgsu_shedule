@@ -107,9 +107,9 @@ class MgsuRepository(private val context: Context) {
                 return ScheduleSanitizer.clean(events, profile)
             }
 
-            var (_, sources) = indexedSources(force = false)
+            var sources = indexedSources(force = false).second
             if (sources.isEmpty()) {
-                (_, sources) = indexedSources(force = true)
+                sources = indexedSources(force = true).second
             }
             if (sources.isEmpty()) error("Для группы $targetGroup не найден официальный файл расписания")
 
@@ -120,7 +120,7 @@ class MgsuRepository(private val context: Context) {
             // this student's group index once, then retry. Never scan unrelated university PDFs.
             if (unique.isEmpty()) {
                 val refreshed = indexedSources(force = true).second
-                val oldPaths = sources.map(MgsuSourceRules::canonicalPath).toSet()
+                val oldPaths = sources.map { MgsuSourceRules.canonicalPath(it.url) }.toSet()
                 val changed = refreshed.any { MgsuSourceRules.canonicalPath(it.url) !in oldPaths }
                 if (changed || failedPdfs > 0) {
                     sources = refreshed

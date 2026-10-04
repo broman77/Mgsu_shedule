@@ -120,7 +120,7 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
             edits = store.editsFlow.first()
             val loadedFavorites = store.favoritesFlow.first()
             favorites = loadedFavorites.copy(
-                teachers = loadedFavorites.teachers.filter(ScheduleParsingRules::isValidTeacher).mapNotNull(ScheduleParsingRules::canonicalTeacher).toSet(),
+                teachers = emptySet(),
                 groups = loadedFavorites.groups.filter(ScheduleParsingRules::isValidGroup).mapNotNull(ScheduleParsingRules::canonicalGroup).toSet()
             )
             tasks = store.tasksFlow.first()
@@ -128,7 +128,7 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
             notificationSettings = store.lessonNotificationSettingsFlow.first()
             val loadedRecent = store.recentSelectionsFlow.first()
             recentSelections = loadedRecent.copy(
-                teachers = loadedRecent.teachers.filter(ScheduleParsingRules::isValidTeacher).mapNotNull(ScheduleParsingRules::canonicalTeacher).distinct().take(8),
+                teachers = emptyList(),
                 groups = loadedRecent.groups.filter(ScheduleParsingRules::isValidGroup).mapNotNull(ScheduleParsingRules::canonicalGroup).distinct().take(10)
             )
             diagnostics = store.readDiagnostics()
@@ -138,7 +138,7 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
                 prepareFirstLaunchCatalog()
             } else {
                 bootstrapReady = true
-                ensureCatalog()
+                profile?.let { ensureStudentGroups(it.institute, it.course) }
             }
             scheduleWorkers()
             rescheduleLessonNotifications()
@@ -146,11 +146,12 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
     }
 
     fun saveProfile(p: UserProfile) = viewModelScope.launch {
-        val normalized = if (p.role == UserRole.STUDENT && ScheduleParsingRules.isValidGroup(p.group)) {
-            p.copy(group = ScheduleParsingRules.canonicalGroup(p.group).orEmpty(), teacher = "")
-        } else if (p.role == UserRole.TEACHER && ScheduleParsingRules.isValidTeacher(p.teacher)) {
-            p.copy(teacher = ScheduleParsingRules.canonicalTeacher(p.teacher).orEmpty(), group = "")
-        } else return@launch
+        if (p.role != UserRole.STUDENT || !ScheduleParsingRules.isValidGroup(p.group)) return@launch
+        val normalized = p.copy(
+            role = UserRole.STUDENT,
+            group = ScheduleParsingRules.canonicalGroup(p.group).orEmpty(),
+            teacher = ""
+        )
         profiles = store.createProfile(normalized)
         profile = normalized
         store.clearCache()
@@ -224,12 +225,11 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
             bootstrapError = ""
             catalogError = ""
             catalogLoading = true
-            bootstrapMessage = "Подождите, получаем список официальных файлов НИУ МГСУ…"
+            bootstrapMessage = "Проверяем официальную страницу расписания НИУ МГСУ…"
             try {
                 catalog = catalogRepository.refresh(force = true)
-                bootstrapMessage = "Проверяем группы и преподавателей…"
-                if (catalog.groups.isEmpty() || catalog.teachers.isEmpty()) {
-                    bootstrapError = "Не удалось полностью обработать официальное расписание. Проверьте интернет и повторите загрузку."
+                if (catalog.sourceLabels.isEmpty()) {
+                    bootstrapError = "На странице МГСУ не найдено файлов расписания. Проверьте интернет и повторите загрузку."
                 } else {
                     bootstrapReady = true
                 }
@@ -241,17 +241,20 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
         }
     }
 
-    fun ensureCatalog(force: Boolean = false) {
-        if (catalogJob?.isActive == true) return
-        if (!force && catalog.teachers.isNotEmpty() && catalog.groups.isNotEmpty()) return
+    fun ensureStudentGroups(institute: String, course: Int, force: Boolean = false) {
+        catalogJob?.cancel()
         catalogJob = viewModelScope.launch {
             catalogLoading = true
             catalogError = ""
             try {
-                catalog = catalogRepository.refresh(force)
-                if (catalog.teachers.isEmpty() && catalog.groups.isEmpty()) catalogError = "Не удалось загрузить справочник с сайта МГСУ"
+                catalog = catalogRepository.refreshGroups(institute, course, force)
+                val count = catalog.groups.count { group ->
+                    ScheduleParsingRules.groupInstitute(group).equals(institute, ignoreCase = true) &&
+                        ScheduleParsingRules.groupCourse(group) == course
+                }
+                if (count == 0) catalogError = "Для выбранного института и курса группы не найдены"
             } catch (t: Throwable) {
-                catalogError = t.message ?: "Не удалось обновить справочник"
+                catalogError = t.message ?: "Не удалось получить группы с сайта МГСУ"
             } finally {
                 catalogLoading = false
             }
@@ -275,7 +278,7 @@ class MainVm(private val context: android.app.Application) : AndroidViewModel(co
         val validRecent = recentSelections.groups.mapNotNull(ScheduleParsingRules::canonicalGroup).filter { it in base }.distinct()
         val validFavorites = favorites.groups.mapNotNull(ScheduleParsingRules::canonicalGroup).filter { it in base }.toSet()
         val q = normalizeSearch(query)
-        if (q.isBlank()) return (validRecent + validFavorites.sorted()).distinct().take(10)
+        if (q.isBlank()) return (validRecent + validFavorites.sorted() + base).distinct().take(20)
         return rankSuggestions(base, query, validFavorites, validRecent).take(10)
     }
 
@@ -568,7 +571,7 @@ private fun FirstLaunchLoadingScreen(vm: MainVm) {
             Text(vm.bootstrapMessage, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Text(
-                "На первом запуске приложение загружает и обрабатывает официальные файлы занятий и экзаменов. Это может занять несколько минут.",
+                "Приложение получает список файлов с официальной страницы МГСУ. PDF нужного курса загрузится после выбора института и курса.",
                 textAlign = TextAlign.Center,
                 color = Color.Gray,
                 style = MaterialTheme.typography.bodySmall
@@ -591,17 +594,18 @@ private fun FirstLaunchLoadingScreen(vm: MainVm) {
 
 @Composable
 private fun ProfileSetup(vm: MainVm, onSave: (UserProfile) -> Unit) {
-    var role by remember { mutableStateOf<UserRole?>(null) }
     var institute by remember { mutableStateOf("ИАГ") }
     var course by remember { mutableIntStateOf(1) }
     var form by remember { mutableStateOf("Очная") }
     var group by remember { mutableStateOf("") }
-    var teacher by remember { mutableStateOf("") }
     var inputError by remember { mutableStateOf("") }
     var start by remember { mutableStateOf("2026-08-31") }
     val institutes = listOf("ИАГ", "ИПГС", "ИГЭС", "ИИЭСМ", "ИЦТМС", "ИЭУКСН", "ИИС ОИАЭ", "ИДО")
 
-    LaunchedEffect(role) { if (role != null) vm.ensureCatalog() }
+    LaunchedEffect(institute, course) {
+        group = ""
+        vm.ensureStudentGroups(institute, course)
+    }
 
     Column(
         Modifier.fillMaxSize().background(Color(0xFFF5F7FA)).verticalScroll(rememberScrollState()).padding(20.dp),
@@ -626,14 +630,14 @@ private fun ProfileSetup(vm: MainVm, onSave: (UserProfile) -> Unit) {
                     )
                     Column {
                         Text("Расписание МГСУ", color = Color.White, fontWeight = FontWeight.Black, fontSize = 28.sp)
-                        Text("Занятия, экзамены и личный календарь", color = Color.White.copy(alpha = .94f), modifier = Modifier.padding(top = 5.dp))
-                        Text("Фото и символика: официальный сайт НИУ МГСУ", color = Color.White.copy(alpha = .78f), fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
+                        Text("Студенческое расписание, задания и личный календарь", color = Color.White.copy(alpha = .94f), modifier = Modifier.padding(top = 5.dp))
+                        Text("Данные расписания: официальный сайт НИУ МГСУ", color = Color.White.copy(alpha = .78f), fontSize = 10.sp, modifier = Modifier.padding(top = 5.dp))
                     }
                 }
             }
         }
         if (vm.profiles.profiles.isNotEmpty()) {
-            Text("Сохранённые профили", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Сохранённые группы", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 vm.profiles.profiles.forEach { saved ->
                     Surface(
@@ -642,11 +646,11 @@ private fun ProfileSetup(vm: MainVm, onSave: (UserProfile) -> Unit) {
                         modifier = Modifier.fillMaxWidth().clickable { vm.switchProfile(saved.id) }
                     ) {
                         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (saved.profile.role == UserRole.STUDENT) Icons.Default.School else Icons.Default.Person, null, tint = MgsuBlue)
+                            Icon(Icons.Default.School, null, tint = MgsuBlue)
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(saved.name, fontWeight = FontWeight.Bold)
-                                Text(if (saved.profile.role == UserRole.STUDENT) "${saved.profile.institute} · ${saved.profile.studyForm}" else "Преподаватель", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                Text("${saved.profile.institute} · ${saved.profile.studyForm}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                             }
                             Icon(Icons.Default.ChevronRight, null)
                         }
@@ -654,90 +658,65 @@ private fun ProfileSetup(vm: MainVm, onSave: (UserProfile) -> Unit) {
                 }
             }
             HorizontalDivider()
-            Text("Добавить ещё один профиль", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Добавить ещё одну группу", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        } else {
+            Text("Выберите свою учебную группу", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
-        Text("Кто вы?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            RoleCard("Студент", Icons.Default.School, role == UserRole.STUDENT) { role = UserRole.STUDENT }
-            RoleCard("Преподаватель", Icons.Default.Person, role == UserRole.TEACHER) { role = UserRole.TEACHER }
+
+        DropField("Институт", institute, institutes) { institute = it }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DropField("Курс", "$course", (1..6).map { "$it" }, Modifier.weight(1f)) { course = it.toInt() }
+            DropField("Форма", form, listOf("Очная", "Очно-заочная", "Заочная"), Modifier.weight(2f)) { form = it }
         }
-        AnimatedVisibility(role != null) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (role == UserRole.STUDENT) {
-                    DropField("Институт", institute, institutes) { institute = it; group = "" }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DropField("Курс", "$course", (1..6).map { "$it" }, Modifier.weight(1f)) { course = it.toInt(); group = "" }
-                        DropField("Форма", form, listOf("Очная", "Очно-заочная", "Заочная"), Modifier.weight(2f)) { form = it }
-                    }
-                    AutoCompleteField(
-                        label = "Группа",
-                        value = group,
-                        placeholder = "Например: ИПГС 3-18",
-                        suggestions = vm.groupSuggestions(group, institute, course),
-                        loading = vm.catalogLoading,
-                        favorites = vm.favorites.groups,
-                        onToggleFavorite = vm::toggleFavoriteGroup,
-                        onValueChange = { group = it },
-                        onSelected = { group = it; vm.recordGroupSelection(it) }
-                    )
-                } else if (role == UserRole.TEACHER) {
-                    AutoCompleteField(
-                        label = "Преподаватель",
-                        value = teacher,
-                        placeholder = "Например: Молоткова П.А.",
-                        suggestions = vm.teacherSuggestions(teacher),
-                        loading = vm.catalogLoading,
-                        favorites = vm.favorites.teachers,
-                        onToggleFavorite = vm::toggleFavoriteTeacher,
-                        onValueChange = { teacher = it },
-                        onSelected = { teacher = it; vm.recordTeacherSelection(it) }
-                    )
-                }
-                if (vm.catalogError.isNotBlank()) {
-                    AssistChip(onClick = { vm.ensureCatalog(true) }, label = { Text("Не удалось обновить подсказки. Повторить") }, leadingIcon = { Icon(Icons.Default.Refresh, null) })
-                }
-                OutlinedTextField(
-                    start, { start = it }, label = { Text("Понедельник 1-й учебной недели") },
-                    supportingText = { Text("Для чётных/нечётных недель и номеров учебных недель") },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true
-                )
-                val canonicalGroup = if (role == UserRole.STUDENT && ScheduleParsingRules.isValidGroup(group)) ScheduleParsingRules.canonicalGroup(group) else null
-                val canonicalTeacher = if (role == UserRole.TEACHER && ScheduleParsingRules.isValidTeacher(teacher)) ScheduleParsingRules.canonicalTeacher(teacher) else null
-                if (role == UserRole.STUDENT && group.isNotBlank() && canonicalGroup == null) {
-                    Text("Выберите конкретную группу, например ИПГС 3-18. Значение вроде «ИПГС 1 курс» больше не принимается.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                if (role == UserRole.TEACHER && teacher.isNotBlank() && canonicalTeacher == null) {
-                    Text("Введите фамилию и два инициала, например Молоткова П.А. Случайные фрагменты PDF больше не принимаются как преподаватели.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                if (inputError.isNotBlank()) {
-                    Text(inputError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                Button(
-                    onClick = {
-                        val r = role ?: return@Button
-                        if (r == UserRole.STUDENT) {
-                            val g = group.takeIf(ScheduleParsingRules::isValidGroup)?.let(ScheduleParsingRules::canonicalGroup)
-                            if (g == null) { inputError = "Нужно выбрать точную группу из подсказки."; return@Button }
-                            inputError = ""
-                            group = g
-                            vm.recordGroupSelection(g)
-                            onSave(UserProfile(r, institute, course, form, g, "", start, true))
-                        } else {
-                            val t = teacher.takeIf(ScheduleParsingRules::isValidTeacher)?.let(ScheduleParsingRules::canonicalTeacher)
-                            if (t == null) { inputError = "Нужно выбрать преподавателя в формате Фамилия И.О."; return@Button }
-                            inputError = ""
-                            teacher = t
-                            vm.recordTeacherSelection(t)
-                            onSave(UserProfile(r, institute, course, form, "", t, start, true))
-                        }
-                    },
-                    enabled = (role == UserRole.STUDENT && canonicalGroup != null) || (role == UserRole.TEACHER && canonicalTeacher != null),
-                    modifier = Modifier.fillMaxWidth().height(52.dp), colors = ButtonDefaults.buttonColors(containerColor = MgsuBlue)
-                ) { Text("Открыть календарь") }
-            }
+        AutoCompleteField(
+            label = "Группа",
+            value = group,
+            placeholder = "Например: ИПГС 1-1",
+            suggestions = vm.groupSuggestions(group, institute, course),
+            loading = vm.catalogLoading,
+            favorites = vm.favorites.groups,
+            onToggleFavorite = vm::toggleFavoriteGroup,
+            onValueChange = { group = it; inputError = "" },
+            onSelected = { group = it; inputError = ""; vm.recordGroupSelection(it) }
+        )
+        if (vm.catalogError.isNotBlank()) {
+            Text(vm.catalogError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            AssistChip(
+                onClick = { vm.ensureStudentGroups(institute, course, true) },
+                label = { Text("Повторить загрузку групп") },
+                leadingIcon = { Icon(Icons.Default.Refresh, null) }
+            )
         }
+        OutlinedTextField(
+            start, { start = it }, label = { Text("Понедельник 1-й учебной недели") },
+            supportingText = { Text("Нужен для чётных/нечётных недель и номеров учебных недель") },
+            modifier = Modifier.fillMaxWidth(), singleLine = true
+        )
+        val canonicalGroup = group.takeIf(ScheduleParsingRules::isValidGroup)?.let(ScheduleParsingRules::canonicalGroup)
+        if (group.isNotBlank() && canonicalGroup == null) {
+            Text("Выберите точную группу из списка, например ИПГС 1-1.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        if (inputError.isNotBlank()) {
+            Text(inputError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Button(
+            onClick = {
+                val g = canonicalGroup
+                if (g == null) {
+                    inputError = "Сначала выберите точную группу из списка МГСУ."
+                    return@Button
+                }
+                group = g
+                vm.recordGroupSelection(g)
+                onSave(UserProfile(UserRole.STUDENT, institute, course, form, g, "", start, true))
+            },
+            enabled = canonicalGroup != null && !vm.catalogLoading,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MgsuBlue)
+        ) { Text("Открыть расписание") }
+
         Spacer(Modifier.height(8.dp))
-        Text("Неофициальное приложение. Расписание, фото и символика — из официальных ресурсов НИУ МГСУ (mgsu.ru).", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        Text("Неофициальное студенческое приложение. Расписание берётся из публичных файлов НИУ МГСУ (mgsu.ru).", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
     }
 }
 
@@ -944,7 +923,7 @@ private fun ScheduleHome(vm: MainVm, profile: UserProfile) {
                 TopAppBar(
                     title = {
                         Column {
-                            Text(if (profile.role == UserRole.STUDENT) profile.group else profile.teacher, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Text(profile.group, fontWeight = FontWeight.Bold, maxLines = 1)
                             val currentWeek = academicWeek(LocalDate.now(), profile.semesterStart)
                             Text(
                                 if (currentWeek > 0) "Учебная неделя №$currentWeek · ${if (currentWeek % 2 == 0L) "чётная" else "нечётная"}" else "Вне учебного семестра",

@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "ru.mgsu.schedule.app-debug-63:/layout_widget_today_schedule.xml.flat",
+        "source": "ru.mgsu.schedule.app-main-65:/layout/widget_today_schedule.xml"
+    },
+    {
+        "merged": "ru.mgsu.schedule.app-debug-63:/xml_widget_today_schedule_info.xml.flat",
+        "source": "ru.mgsu.schedule.app-main-65:/xml/widget_today_schedule_info.xml"
+    },
+    {
+        "merged": "ru.mgsu.schedule.app-debug-63:/layout_widget_next_class.xml.flat",
+        "source": "ru.mgsu.schedule.app-main-65:/layout/widget_next_class.xml"
+    },
+    {
+        "merged": "ru.mgsu.schedule.app-debug-63:/drawable-nodpi_official_mgsu_logo.png.flat",
+        "source": "ru.mgsu.schedule.app-main-65:/drawable-nodpi/official_mgsu_logo.png"
+    },
+    {
+        "merged": "ru.mgsu.schedule.app-debug-63:/xml_widget_next_class_info.xml.flat",
+        "source": "ru.mgsu.schedule.app-main-65:/xml/widget_next_class_info.xml"
+    }
+]

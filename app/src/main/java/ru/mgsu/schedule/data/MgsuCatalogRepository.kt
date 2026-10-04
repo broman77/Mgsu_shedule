@@ -108,8 +108,14 @@ class MgsuCatalogRepository(private val context: Context) {
         var readablePdfs = 0
 
         // Prefer ordinary lesson/exam timetables; practice documents are only a last resort.
+        // Do not stop after the first PDF: MGSU can split one course into a main file plus
+        // separate group ranges (for example 40-43/50/51/80/81). We still stay scoped to the
+        // selected institute/course, so this remains far smaller than the old 260-PDF scan.
         val preferred = sources.filterNot { MgsuSourceRules.isPracticeSource(it.url, it.label) }
-        val candidates = (preferred + sources).distinctBy { MgsuSourceRules.canonicalPath(it.url) }
+            .distinctBy { MgsuSourceRules.canonicalPath(it.url) }
+        val practice = sources.filter { MgsuSourceRules.isPracticeSource(it.url, it.label) }
+            .distinctBy { MgsuSourceRules.canonicalPath(it.url) }
+        val candidates = if (preferred.isNotEmpty()) preferred else practice
 
         for (source in candidates.take(MAX_GROUP_SCAN_PDFS)) {
             runCatching {
@@ -127,9 +133,6 @@ class MgsuCatalogRepository(private val context: Context) {
                 }
             }
 
-            // One normal course PDF usually contains every group for that institute/course. Once
-            // we have a healthy set, avoid downloading session/practice duplicates unnecessarily.
-            if (foundGroups.size >= MIN_HEALTHY_GROUP_SET && readablePdfs > 0) break
         }
 
         if (foundGroups.isEmpty()) {
@@ -316,7 +319,6 @@ class MgsuCatalogRepository(private val context: Context) {
     companion object {
         private const val CATALOG_SCHEMA = 6
         private const val MAX_GROUP_SCAN_PDFS = 24
-        private const val MIN_HEALTHY_GROUP_SET = 2
         private const val INDEX_TTL_MS = 6L * 60L * 60L * 1000L
         private const val BROWSER_UA = "Mozilla/5.0 (Linux; Android 16; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
     }

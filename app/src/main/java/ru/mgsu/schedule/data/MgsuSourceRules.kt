@@ -76,7 +76,7 @@ object MgsuSourceRules {
         val out = linkedSetOf<Int>()
 
         // Visible anchors currently use forms such as "ИПГС бак 1 курс" and "1-4 курс".
-        Regex("(?<!\\d)([1-6])\\s*[-–—]\\s*([1-6])\\s*(?:КУРС|К\\b|K\\b)").findAll(marker).forEach { m ->
+        Regex("(?<!\\d)([1-6])\\s*(?:[-–—]|\\s)\\s*([1-6])\\s*(?:КУРС|К\\b|K\\b)").findAll(marker).forEach { m ->
             val a = m.groupValues[1].toInt()
             val b = m.groupValues[2].toInt()
             for (c in minOf(a, b)..maxOf(a, b)) out += c

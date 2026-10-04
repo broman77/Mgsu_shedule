@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="ru.mgsu.schedule.data.ChangeDetectorTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-04T07:07:08" hostname="runnervm8df0l" time="0.064">
+  <properties/>
+  <testcase name="detectsRoomChange" classname="ru.mgsu.schedule.data.ChangeDetectorTest" time="0.062"/>
+  <testcase name="detectsRemovedEvent" classname="ru.mgsu.schedule.data.ChangeDetectorTest" time="0.0"/>
+  <testcase name="firstSyncDoesNotGenerateNoise" classname="ru.mgsu.schedule.data.ChangeDetectorTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

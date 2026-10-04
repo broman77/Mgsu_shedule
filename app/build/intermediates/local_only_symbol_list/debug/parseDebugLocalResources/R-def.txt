@@ -1,0 +1,16 @@
+R_DEF: Internal format may change without notice
+local
+color mgsu_blue
+color white
+drawable official_mgsu_logo
+id widget_count
+id widget_day
+id widget_event
+id widget_list
+id widget_meta
+id widget_title
+layout widget_next_class
+layout widget_today_schedule
+style Theme.MGSUSchedule
+xml widget_next_class_info
+xml widget_today_schedule_info
