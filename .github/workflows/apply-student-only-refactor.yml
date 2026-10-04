@@ -1,5 +1,6 @@
 name: Apply student-only refactor
 
+# One-shot validation workflow for the student-only parser migration.
 on:
   push:
     branches: [ "fix/student-only-mgsu-parser" ]
