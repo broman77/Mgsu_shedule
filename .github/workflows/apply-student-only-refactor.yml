@@ -1,0 +1,69 @@
+name: Apply student-only refactor
+
+on:
+  push:
+    branches: [ "fix/student-only-mgsu-parser" ]
+    paths:
+      - "tools/refactor_student_only.py"
+      - ".github/workflows/apply-student-only-refactor.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refactor-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout refactor branch
+        uses: actions/checkout@v6
+        with:
+          ref: fix/student-only-mgsu-parser
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      - name: Apply one-shot source refactor
+        run: python3 tools/refactor_student_only.py
+
+      - name: Build APK and run unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace --console=plain --no-daemon 2>&1 | tee student-only-build.log
+          test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Commit validated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app README.md CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+          else
+            git commit -m "Refactor MGSU parser for student-only flow"
+            git push origin HEAD:fix/student-only-mgsu-parser
+          fi
+
+      - name: Upload validation build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-only-parser-validation
+          path: |
+            student-only-build.log
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
