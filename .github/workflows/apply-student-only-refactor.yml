@@ -7,6 +7,7 @@ on:
     paths:
       - "tools/refactor_student_only.py"
       - "tools/fix_student_parser_compile.py"
+      - "app/src/test/**"
       - ".github/workflows/apply-student-only-refactor.yml"
   workflow_dispatch:
 
