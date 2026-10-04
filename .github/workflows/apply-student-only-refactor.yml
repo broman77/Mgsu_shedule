@@ -6,6 +6,7 @@ on:
     branches: [ "fix/student-only-mgsu-parser" ]
     paths:
       - "tools/refactor_student_only.py"
+      - "tools/fix_student_parser_compile.py"
       - ".github/workflows/apply-student-only-refactor.yml"
   workflow_dispatch:
 
@@ -34,7 +35,9 @@ jobs:
           gradle-version: "8.9"
 
       - name: Apply one-shot source refactor
-        run: python3 tools/refactor_student_only.py
+        run: |
+          python3 tools/refactor_student_only.py
+          python3 tools/fix_student_parser_compile.py
 
       - name: Build APK and run unit tests
         shell: bash
