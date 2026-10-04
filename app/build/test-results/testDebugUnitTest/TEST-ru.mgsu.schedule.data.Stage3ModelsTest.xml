@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="ru.mgsu.schedule.data.Stage3ModelsTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-10-04T07:07:08" hostname="runnervm8df0l" time="0.002">
-  <properties/>
-  <testcase name="lessonNotificationSettings_roundTrip_andSupportedReminder" classname="ru.mgsu.schedule.data.Stage3ModelsTest" time="0.001"/>
-  <testcase name="eventColorSettings_roundTrip" classname="ru.mgsu.schedule.data.Stage3ModelsTest" time="0.0"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>
