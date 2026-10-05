@@ -24,6 +24,44 @@ import kotlin.math.min
  *  - weekday labels are converted to vertical bands instead of assigning every row to the
  *    nearest single marker (the old behaviour could put most of a PDF onto one weekday).
  */
+internal object LessonRowGeometry {
+    data class Anchor(val y: Float, val startsAtTop: Boolean)
+
+    fun band(anchors: List<Anchor>, index: Int, pageHeight: Float): Pair<Float, Float>? {
+        if (index !in anchors.indices) return null
+        val tops = estimatedTops(anchors)
+        val top = tops[index].coerceAtLeast(0f)
+        val bottom = if (index < anchors.lastIndex) {
+            tops[index + 1]
+        } else {
+            tops[index] + localGap(anchors, index)
+        }.coerceAtMost(pageHeight)
+        return if (bottom > top + 3f) top to bottom else null
+    }
+
+    internal fun estimatedTops(anchors: List<Anchor>): List<Float> = anchors.indices.map { index ->
+        val gap = localGap(anchors, index)
+        val shift = if (anchors[index].startsAtTop) {
+            // Current MGSU PDFs print 08.30 and 09.50 on separate lines. The 08.30 baseline is
+            // close to the TOP of the table cell, not its vertical centre. Midpoint boundaries
+            // therefore leak the previous lesson into an empty following row (IAG 1-41 exposed
+            // this as five Monday lessons instead of the real 08:30, 10:00 and 13:00 lessons).
+            (gap * 0.20f).coerceIn(4f, 9f)
+        } else {
+            gap / 2f
+        }
+        anchors[index].y - shift
+    }
+
+    private fun localGap(anchors: List<Anchor>, index: Int): Float {
+        val gaps = buildList {
+            if (index > 0) (anchors[index].y - anchors[index - 1].y).takeIf { it in 12f..120f }?.let(::add)
+            if (index < anchors.lastIndex) (anchors[index + 1].y - anchors[index].y).takeIf { it in 12f..120f }?.let(::add)
+        }
+        return gaps.minOrNull() ?: 32f
+    }
+}
+
 class PdfScheduleParser(private val profile: UserProfile) {
     private data class G(val page: Int, val x: Float, val y: Float, val w: Float, val h: Float, val t: String)
     private data class Frag(val page: Int, val y: Float, val x1: Float, val x2: Float, val text: String) {
@@ -31,7 +69,7 @@ class PdfScheduleParser(private val profile: UserProfile) {
     }
     private data class SourcePage(val page: Int, val width: Float, val height: Float, val glyphs: List<G>, val frags: List<Frag>)
     private data class Column(val center: Float, val left: Float, val right: Float, val header: String, val canonicalGroup: String?)
-    private data class TimeRow(val y: Float, val start: String, val end: String, val pairNo: Int)
+    private data class TimeRow(val y: Float, val start: String, val end: String, val pairNo: Int, val startsAtTop: Boolean)
     private data class DatedTimeRow(val row: TimeRow, val weekday: Int)
     private data class DayBand(val day: Int, val top: Float, val bottom: Float, val center: Float)
     private data class RawDayMarker(val day: Int, val top: Float, val bottom: Float, val center: Float)
@@ -75,14 +113,10 @@ class PdfScheduleParser(private val profile: UserProfile) {
             val datedRows = assignWeekdays(p, timeRows)
             if (datedRows.isEmpty()) continue
 
+            val rowAnchors = datedRows.map { LessonRowGeometry.Anchor(it.row.y, it.row.startsAtTop) }
             for ((index, dated) in datedRows.withIndex()) {
                 val row = dated.row
-                // Row boundaries are defined only by neighbouring official pair rows. This is
-                // considerably more stable than using the centre of a vertically printed weekday
-                // word as the row anchor.
-                val top = if (index == 0) row.y - 30f else (datedRows[index - 1].row.y + row.y) / 2f
-                val bottom = if (index == datedRows.lastIndex) row.y + 46f else (row.y + datedRows[index + 1].row.y) / 2f
-                if (bottom <= top) continue
+                val (top, bottom) = LessonRowGeometry.band(rowAnchors, index, p.height) ?: continue
 
                 for (c in selected) {
                     val rawCell = cellText(p.glyphs, c, top, bottom)
@@ -136,8 +170,10 @@ class PdfScheduleParser(private val profile: UserProfile) {
     }
 
     private fun findLessonTimeRows(p: SourcePage, firstDataLeft: Float): List<TimeRow> {
-        val leftLimit = maxOf(firstDataLeft, p.width * .22f).coerceAtMost(p.width * .34f)
-        val leftFrags = p.frags.filter { it.x1 < leftLimit }
+        // The time column is strictly to the left of the first student-group column.
+        // Do not broaden this region into the first group: subject text there can distort the
+        // detected time-row baseline and is the root cause of several false empty-row lessons.
+        val leftFrags = p.frags.filter { it.x2 <= firstDataLeft + 3f }
 
         // PDFBox may split "08.30-09.50" into two or three text fragments. Rebuild each
         // visual row before looking for an official pair slot, then fall back to a single start
@@ -153,7 +189,7 @@ class PdfScheduleParser(private val profile: UserProfile) {
             val range = ScheduleParsingRules.normalizeLessonTimeRange(text)
             if (range != null) {
                 val no = ScheduleParsingRules.pairNumber(range.first, range.second)
-                if (no != null) rows += TimeRow(y, range.first, range.second, no)
+                if (no != null) rows += TimeRow(y, range.first, range.second, no, startsAtTop = false)
                 continue
             }
 
@@ -162,7 +198,7 @@ class PdfScheduleParser(private val profile: UserProfile) {
             val match = ScheduleParsingRules.officialPairTimes.entries.firstOrNull { (_, times) ->
                 times.first in clocks
             }
-            if (match != null) rows += TimeRow(y, match.value.first, match.value.second, match.key)
+            if (match != null) rows += TimeRow(y, match.value.first, match.value.second, match.key, startsAtTop = true)
         }
 
         return rows

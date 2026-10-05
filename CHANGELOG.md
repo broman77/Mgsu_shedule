@@ -1,3 +1,9 @@
+## Parser v7 — IAG table row boundary fix
+
+- Fixed false lessons leaking into empty rows when MGSU prints start/end time on separate lines.
+- Time-row detection is now restricted to the real `Часы` column instead of overlapping the first group column.
+- Bumped parser cache version so previously misparsed schedules are rebuilt.
+
 # Changelog
 
 ## Student-only parser v6
