@@ -31,7 +31,10 @@ class LiveMgsuGridParserTest {
         for (sample in samples) {
             val file = File(dir, sample.fileName)
             assertTrue("Live fixture missing: ${sample.fileName}", file.isFile && file.length() > 10_000)
-            val events = parse(file, sample.institute, sample.group)
+            val pages = extractPages(file)
+            printDiagnostics(sample.group, pages)
+            val events = parsePages(pages, file, sample.institute, sample.group)
+            println("LIVE EVENTS ${sample.group}: ${events.sortedWith(compareBy<ScheduleEvent> { it.weekday }.thenBy { it.startTime }).joinToString(" || ") { "d=${it.weekday} ${it.startTime}-${it.endTime} ${it.title}" }}")
             assertTrue("${sample.group}: parser returned no lessons", events.isNotEmpty())
             assertTrue("${sample.group}: invalid weekday", events.all { it.weekday in 1..6 })
             assertTrue("${sample.group}: more than one structural event per official pair row", events.groupingBy { it.weekday }.eachCount().values.all { it <= 8 })
@@ -48,7 +51,10 @@ class LiveMgsuGridParserTest {
         val file = File(dir, "IAG_1k_0826_20.pdf")
         assertTrue("Live IAG fixture missing", file.isFile && file.length() > 10_000)
 
-        val events = parse(file, "ИАГ", "ИАГ 1-41")
+        val pages = extractPages(file)
+        printDiagnostics("ИАГ 1-41", pages)
+        val events = parsePages(pages, file, "ИАГ", "ИАГ 1-41")
+        println("LIVE EVENTS ИАГ 1-41: ${events.sortedWith(compareBy<ScheduleEvent> { it.weekday }.thenBy { it.startTime }).joinToString(" || ") { "d=${it.weekday} ${it.startTime}-${it.endTime} ${it.title}" }}")
         assertTrue("ИАГ 1-41: parser returned no lessons", events.isNotEmpty())
         val monday = events.filter { it.weekday == 1 }.sortedBy { it.startTime }
         assertTrue("ИАГ 1-41: Monday is empty", monday.isNotEmpty())
@@ -56,7 +62,12 @@ class LiveMgsuGridParserTest {
         assertFalse("ИАГ 1-41: false late Monday lesson", monday.any { it.startTime in setOf("14:30", "16:00", "18:10", "19:40") })
     }
 
-    private fun parse(file: File, institute: String, group: String): List<ScheduleEvent> {
+    private fun parsePages(
+        pages: List<MgsuGridParserCore.Page>,
+        file: File,
+        institute: String,
+        group: String
+    ): List<ScheduleEvent> {
         val profile = UserProfile(
             role = UserRole.STUDENT,
             institute = institute,
@@ -65,9 +76,24 @@ class LiveMgsuGridParserTest {
             group = group,
             semesterStart = "2026-08-31"
         )
-        return extractPages(file).flatMap { page ->
+        return pages.flatMap { page ->
             MgsuGridParserCore.parseLessons(page, profile, file.toURI().toString(), "$institute 1 курс live")
         }.distinctBy { it.id }
+    }
+
+    private fun printDiagnostics(group: String, pages: List<MgsuGridParserCore.Page>) {
+        for (page in pages) {
+            val lines = MgsuGridParserCore.buildLines(page.glyphs)
+            val columns = MgsuGridParserCore.findGroupColumns(page, lines)
+            val groupLines = lines.filter { ScheduleParsingRules.canonicalGroup(it.text) != null }.take(20)
+            val pairHeaderLines = lines.filter { it.text.contains("пар", ignoreCase = true) }.take(20)
+            val numericLines = lines.filter { it.text.trim().matches(Regex("^[1-8]$")) }.take(80)
+            println("LIVE DIAG $group page=${page.number} size=${page.width}x${page.height} glyphs=${page.glyphs.size} lines=${lines.size}")
+            println("LIVE DIAG $group columns=${columns.joinToString { "${it.group}@${it.center}[${it.left},${it.right}] y=${it.headerY}" }}")
+            println("LIVE DIAG $group groupLines=${groupLines.joinToString { "'${it.text}'@(${it.cx},${it.y})" }}")
+            println("LIVE DIAG $group pairHeaders=${pairHeaderLines.joinToString { "'${it.text}'@(${it.cx},${it.y})" }}")
+            println("LIVE DIAG $group numeric=${numericLines.joinToString { "${it.text}@(${it.cx},${it.y})" }}")
+        }
     }
 
     private fun extractPages(file: File): List<MgsuGridParserCore.Page> {
