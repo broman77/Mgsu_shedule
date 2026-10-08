@@ -62,6 +62,14 @@ jobs:
           fetch_pdf IAG_1k_0826_20.pdf "${hosts[@]}"
           ls -lh live-pdfs
 
+      - name: Upload exact live PDF fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-v9-live-pdfs
+          path: live-pdfs/
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Unit tests plus live official-PDF verification
         id: tests
         shell: bash
