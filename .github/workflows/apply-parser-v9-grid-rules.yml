@@ -54,7 +54,6 @@ jobs:
               fi
               rm -f "live-pdfs/${file}"
             done
-            echo "Could not download ${file}" >&2
             return 1
           }
           hosts=(mgsu.ru www.mgsu.ru iiesm.mgsu.ru www-20.mgsu.ru)
@@ -105,15 +104,36 @@ jobs:
                       fh.write('%d\t%.3f\t%.3f\t%.3f\t%.3f\n' % row)
               print(pdf.name, 'rules=', len(unique), 'pages=', len(doc))
           PY
-          ls -lh live-rules
 
-      - name: Compile and run all parser tests against live PDFs
+      - name: Run parser tests against live PDFs
+        id: parser_tests
+        continue-on-error: true
         env:
           MGSU_LIVE_DIR: ${{ github.workspace }}/live-pdfs
           MGSU_RULE_DIR: ${{ github.workspace }}/live-rules
         run: |
           set -euxo pipefail
-          gradle :app:testDebugUnitTest --stacktrace --console=plain --no-daemon
+          gradle :app:testDebugUnitTest --info --stacktrace --console=plain --no-daemon
+
+      - name: Upload parser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-v9-exact-grid-diagnostics
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+            live-rules/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop on parser regression
+        if: steps.parser_tests.outcome != 'success'
+        run: exit 1
+
+      - name: Build verified debug APK
+        run: |
+          set -euxo pipefail
           gradle :app:assembleDebug --stacktrace --console=plain --no-daemon
           test -s app/build/outputs/apk/debug/app-debug.apk
 
