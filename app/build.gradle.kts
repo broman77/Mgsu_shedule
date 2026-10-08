@@ -74,5 +74,8 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     testImplementation("junit:junit:4.13.2")
+    // Desktop PDFBox is test-only. CI uses it to feed the same structural core with
+    // glyph coordinates from current official MGSU PDFs, without changing app runtime deps.
+    testImplementation("org.apache.pdfbox:pdfbox:2.0.32")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
