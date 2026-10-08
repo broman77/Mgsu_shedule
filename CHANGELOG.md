@@ -1,3 +1,9 @@
+
+### Parser v8 — day-bounded lesson cells
+- Lesson-cell geometry is now calculated independently inside each weekday instead of across the whole PDF page.
+- Weekday labels are used directly to assign time rows when reliable, with pair-number cycles kept only as a fallback.
+- Prevents an empty 19:40 row from swallowing the next day's first lesson and falsely showing classes through 21:00 across many groups.
+- Parser cache version bumped to 8 so devices rebuild previously corrupted schedules.
 ## Parser v7 — IAG table row boundary fix
 
 - Fixed false lessons leaking into empty rows when MGSU prints start/end time on separate lines.

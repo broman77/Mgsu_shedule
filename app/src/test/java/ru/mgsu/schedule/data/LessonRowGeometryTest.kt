@@ -46,4 +46,25 @@ class LessonRowGeometryTest {
         assertTrue(band.second - band.first in 29f..31f)
         assertTrue(band.second < 300f)
     }
+
+    @Test
+    fun `last row of one day is bounded using only that day's anchors`() {
+        // Monday has pairs 1..8; Tuesday starts immediately below. The old page-global geometry
+        // used Tuesday's first anchor as the bottom of Monday pair 8, allowing Tuesday text to
+        // become a fake Monday 19:40 lesson. Per-day geometry must end pair 8 by Monday's own gap.
+        val monday = listOf(
+            LessonRowGeometry.Anchor(100f, true),
+            LessonRowGeometry.Anchor(132f, true),
+            LessonRowGeometry.Anchor(164f, true),
+            LessonRowGeometry.Anchor(196f, true),
+            LessonRowGeometry.Anchor(228f, true),
+            LessonRowGeometry.Anchor(260f, true),
+            LessonRowGeometry.Anchor(292f, true),
+            LessonRowGeometry.Anchor(324f, true)
+        )
+        val pair8 = LessonRowGeometry.band(monday, 7, 700f)!!
+        assertTrue(pair8.second < 356f)
+        assertTrue(pair8.second > 324f)
+    }
+
 }

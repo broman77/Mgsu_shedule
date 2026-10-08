@@ -283,7 +283,7 @@ class AppStore(private val context: Context) {
     }
 
     companion object {
-        const val CURRENT_PARSER_VERSION = 7
+        const val CURRENT_PARSER_VERSION = 8
 
         fun validProfile(profile: UserProfile): Boolean =
             profile.role == UserRole.STUDENT && ScheduleParsingRules.isValidGroup(profile.group)
