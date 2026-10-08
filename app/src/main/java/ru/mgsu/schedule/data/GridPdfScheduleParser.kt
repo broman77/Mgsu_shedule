@@ -8,7 +8,8 @@ import java.io.File
 
 /**
  * Thin PDFBox adapter for the new structural parser.
- * All timetable decisions live in [MgsuGridParserCore]; this class only extracts glyph geometry.
+ * Text glyphs and drawn table borders are extracted here; all timetable decisions live in
+ * [MgsuGridParserCore].
  */
 class GridPdfScheduleParser(private val profile: UserProfile) {
     fun parse(file: File, sourceUrl: String, sourceLabel: String): List<ScheduleEvent> {
@@ -24,11 +25,13 @@ class GridPdfScheduleParser(private val profile: UserProfile) {
                     val rotated = ((page.rotation % 180) + 180) % 180 == 90
                     val visualWidth = if (rotated) page.mediaBox.height else page.mediaBox.width
                     val visualHeight = if (rotated) page.mediaBox.width else page.mediaBox.height
+                    val rules = runCatching { PdfGridRuleExtractor(page).extract() }.getOrDefault(emptyList())
                     MgsuGridParserCore.Page(
                         number = pageNo,
                         width = visualWidth,
                         height = visualHeight,
-                        glyphs = glyphs
+                        glyphs = glyphs,
+                        rules = rules
                     )
                 }
 
