@@ -11,7 +11,7 @@ jobs:
   apply-and-verify:
     if: github.event.head_commit.message == 'Apply parser v9 exact grid rules'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout branch
         uses: actions/checkout@v6
@@ -43,13 +43,18 @@ jobs:
             local file="$1"; shift
             for host in "$@"; do
               url="https://${host}${base_path}/${file}"
+              echo "Trying ${url}"
               if curl -fL --retry 2 --connect-timeout 15 --max-time 90 \
                 -A 'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Safari/537.36' \
                 -e "https://${host}${base_path}/" "$url" -o "live-pdfs/${file}"; then
-                if head -c 4 "live-pdfs/${file}" | grep -q '%PDF'; then return 0; fi
+                if head -c 4 "live-pdfs/${file}" | grep -q '%PDF'; then
+                  echo "Downloaded ${file} from ${host}"
+                  return 0
+                fi
               fi
               rm -f "live-pdfs/${file}"
             done
+            echo "Could not download ${file}" >&2
             return 1
           }
           hosts=(mgsu.ru www.mgsu.ru iiesm.mgsu.ru www-20.mgsu.ru)
@@ -58,9 +63,54 @@ jobs:
           fetch_pdf IIESM_1k_0210.pdf "${hosts[@]}"
           fetch_pdf IAG_1k_0826_20.pdf "${hosts[@]}"
 
+      - name: Extract table rules independently with PyMuPDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet 'PyMuPDF==1.26.5'
+          mkdir -p live-rules
+          python3 - <<'PY'
+          from pathlib import Path
+          import fitz
+
+          src = Path('live-pdfs')
+          dst = Path('live-rules')
+          for pdf in sorted(src.glob('*.pdf')):
+              doc = fitz.open(pdf)
+              rows = []
+              for page_no, page in enumerate(doc, 1):
+                  for drawing in page.get_drawings():
+                      for item in drawing.get('items', []):
+                          kind = item[0]
+                          if kind == 'l':
+                              a, b = item[1], item[2]
+                              if abs(a.x - b.x) <= 2.2 or abs(a.y - b.y) <= 2.2:
+                                  rows.append((page_no, a.x, a.y, b.x, b.y))
+                          elif kind == 're':
+                              r = item[1]
+                              rows.extend([
+                                  (page_no, r.x0, r.y0, r.x1, r.y0),
+                                  (page_no, r.x1, r.y0, r.x1, r.y1),
+                                  (page_no, r.x1, r.y1, r.x0, r.y1),
+                                  (page_no, r.x0, r.y1, r.x0, r.y0),
+                              ])
+              unique = {}
+              for row in rows:
+                  key = tuple(round(v * 2) if i else v for i, v in enumerate(row))
+                  unique.setdefault(key, row)
+              out = dst / f'{pdf.name}.rules.tsv'
+              with out.open('w', encoding='utf-8') as fh:
+                  fh.write('# page\tx1\ty1\tx2\ty2\n')
+                  for row in unique.values():
+                      fh.write('%d\t%.3f\t%.3f\t%.3f\t%.3f\n' % row)
+              print(pdf.name, 'rules=', len(unique), 'pages=', len(doc))
+          PY
+          ls -lh live-rules
+
       - name: Compile and run all parser tests against live PDFs
         env:
           MGSU_LIVE_DIR: ${{ github.workspace }}/live-pdfs
+          MGSU_RULE_DIR: ${{ github.workspace }}/live-rules
         run: |
           set -euxo pipefail
           gradle :app:testDebugUnitTest --stacktrace --console=plain --no-daemon
@@ -73,8 +123,9 @@ jobs:
           set -euxo pipefail
           git config user.name "broman77"
           git config user.email "71395385+broman77@users.noreply.github.com"
-          git add app/src/main/java/ru/mgsu/schedule/data/MgsuGridParserCore.kt \
-                  app/src/test/java/ru/mgsu/schedule/data/LiveMgsuGridParserTest.kt
-          git rm tools/apply_parser_v9_grid_rules.py .github/workflows/apply-parser-v9-grid-rules.yml
+          git add app/src/main/java/ru/mgsu/schedule/data/MgsuGridParserCore.kt
+          git rm tools/apply_parser_v9_grid_rules.py \
+                 tools/apply_parser_v9_grid_rules.trigger \
+                 .github/workflows/apply-parser-v9-grid-rules.yml
           git commit -m "Use exact PDF grid cells in parser v9"
           git push origin HEAD:rewrite/parser-v9-from-scratch
