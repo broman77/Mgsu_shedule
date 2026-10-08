@@ -14,9 +14,9 @@ import java.io.File
 /**
  * Optional live regression suite.
  *
- * Normal local unit tests skip this class. CI sets MGSU_LIVE_DIR after downloading the current
- * official PDFs from mgsu.ru. The same structural core used by Android is then fed real glyph
- * coordinates through desktop PDFBox.
+ * Normal local unit tests skip this class. CI downloads current official PDFs from mgsu.ru,
+ * extracts text with desktop PDFBox and extracts the drawn table grid independently with
+ * PyMuPDF. Both are then fed into the exact same Android-free structural core used by the app.
  */
 class LiveMgsuGridParserTest {
     @Test
@@ -88,7 +88,7 @@ class LiveMgsuGridParserTest {
             val groupLines = lines.filter { ScheduleParsingRules.canonicalGroup(it.text) != null }.take(20)
             val pairHeaderLines = lines.filter { it.text.contains("пар", ignoreCase = true) }.take(20)
             val numericLines = lines.filter { it.text.trim().matches(Regex("^[1-8]$")) }.take(80)
-            println("LIVE DIAG $group page=${page.number} size=${page.width}x${page.height} glyphs=${page.glyphs.size} lines=${lines.size}")
+            println("LIVE DIAG $group page=${page.number} size=${page.width}x${page.height} glyphs=${page.glyphs.size} rules=${page.rules.size} lines=${lines.size}")
             println("LIVE DIAG $group columns=${columns.joinToString { "${it.group}@${it.center}[${it.left},${it.right}] y=${it.headerY}" }}")
             println("LIVE DIAG $group groupLines=${groupLines.joinToString { "'${it.text}'@(${it.cx},${it.y})" }}")
             println("LIVE DIAG $group pairHeaders=${pairHeaderLines.joinToString { "'${it.text}'@(${it.cx},${it.y})" }}")
@@ -97,6 +97,7 @@ class LiveMgsuGridParserTest {
     }
 
     private fun extractPages(file: File): List<MgsuGridParserCore.Page> {
+        val rulesByPage = loadRules(file.name)
         PDDocument.load(file).use { document ->
             val stripper = DesktopStripper()
             stripper.sortByPosition = true
@@ -106,9 +107,36 @@ class LiveMgsuGridParserTest {
                 val rotated = ((page.rotation % 180) + 180) % 180 == 90
                 val visualWidth = if (rotated) page.mediaBox.height else page.mediaBox.width
                 val visualHeight = if (rotated) page.mediaBox.width else page.mediaBox.height
-                MgsuGridParserCore.Page(pageNo, visualWidth, visualHeight, glyphs)
+                MgsuGridParserCore.Page(
+                    pageNo,
+                    visualWidth,
+                    visualHeight,
+                    glyphs,
+                    rulesByPage[pageNo].orEmpty()
+                )
             }
         }
+    }
+
+    private fun loadRules(fileName: String): Map<Int, List<MgsuGridParserCore.Rule>> {
+        val rawDir = System.getenv("MGSU_RULE_DIR").orEmpty()
+        assumeTrue("MGSU_RULE_DIR is not set; live grid verification skipped", rawDir.isNotBlank())
+        val file = File(rawDir, "$fileName.rules.tsv")
+        assertTrue("Independent grid fixture missing for $fileName", file.isFile && file.length() > 20)
+        return file.readLines()
+            .asSequence()
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .mapNotNull { line ->
+                val p = line.split('\t')
+                if (p.size != 5) return@mapNotNull null
+                val page = p[0].toIntOrNull() ?: return@mapNotNull null
+                val x1 = p[1].toFloatOrNull() ?: return@mapNotNull null
+                val y1 = p[2].toFloatOrNull() ?: return@mapNotNull null
+                val x2 = p[3].toFloatOrNull() ?: return@mapNotNull null
+                val y2 = p[4].toFloatOrNull() ?: return@mapNotNull null
+                page to MgsuGridParserCore.Rule(x1, y1, x2, y2)
+            }
+            .groupBy({ it.first }, { it.second })
     }
 
     private fun liveDirOrSkip(): File {
