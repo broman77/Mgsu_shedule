@@ -58,6 +58,16 @@ internal object MgsuGridParserCore {
 
     data class PairAnchor(val pairNo: Int, val y: Float)
 
+    private data class HeaderCandidate(
+        val line: Line,
+        val group: String,
+        val direct: Boolean,
+        val parts: Int
+    )
+
+    private data class PairGlyph(val pairNo: Int, val y: Float, val x: Float)
+    private data class PairColumn(val center: Float, val cycles: List<List<PairAnchor>>)
+
     data class DayCycle(
         val day: Int,
         val anchors: List<PairAnchor>,
@@ -76,13 +86,11 @@ internal object MgsuGridParserCore {
         val columns = findGroupColumns(page, lines)
         val column = columns.firstOrNull { it.group == targetGroup } ?: return emptyList()
         val headerBottom = columns.maxOfOrNull { it.headerY }?.plus(7f) ?: page.height * .08f
-        val pairHeader = findHeader(lines, "ПАРА", headerBottom + page.height * .08f)
-        val pairCenter = pairHeader?.cx ?: inferPairCenter(columns, page.width)
-        val anchors = findPairAnchors(lines, pairCenter, page.width, headerBottom)
-        val rawCycles = splitPairCycles(anchors)
-        if (rawCycles.isEmpty()) return emptyList()
+        val firstGroupLeft = columns.minOfOrNull { it.left } ?: column.left
+        val pairColumn = findPairColumn(page, firstGroupLeft, headerBottom) ?: return emptyList()
+        val rawCycles = pairColumn.cycles
 
-        val dayMarkers = findWeekdayMarkers(page, pairCenter)
+        val dayMarkers = findWeekdayMarkers(page, pairColumn.center)
         val cycles = assignAndBoundCycles(rawCycles, dayMarkers, headerBottom, page.height)
         if (cycles.isEmpty()) return emptyList()
 
@@ -205,10 +213,14 @@ internal object MgsuGridParserCore {
 
     internal fun findGroupColumns(page: Page, lines: List<Line>): List<Column> {
         val headerZone = lines.filter { it.y < page.height * .27f && it.x1 > page.width * .06f }
-        val candidates = mutableListOf<Pair<Line, String>>()
+        val candidates = mutableListOf<HeaderCandidate>()
 
+        // A complete line that already contains one canonical group is always the safest
+        // header candidate. Reconstructed windows exist only for PDFs that split the header.
         headerZone.forEach { line ->
-            ScheduleParsingRules.canonicalGroup(line.text)?.let { candidates += line to it }
+            ScheduleParsingRules.canonicalGroup(line.text)?.let { group ->
+                candidates += HeaderCandidate(line, group, direct = true, parts = 1)
+            }
         }
 
         headerZone.groupBy { (it.y / 4f).roundToInt() }.values.forEach { sameLine ->
@@ -220,28 +232,38 @@ internal object MgsuGridParserCore {
                     if (parts.zipWithNext().any { (a, b) -> b.x1 - a.x2 > 85f }) continue
                     val text = parts.joinToString(" ") { it.text }
                     val group = ScheduleParsingRules.canonicalGroup(text) ?: continue
-                    candidates += Line(
-                        y = parts.map { it.y }.average().toFloat(),
-                        x1 = parts.minOf { it.x1 },
-                        x2 = parts.maxOf { it.x2 },
-                        text = text
-                    ) to group
+                    candidates += HeaderCandidate(
+                        line = Line(
+                            y = parts.map { it.y }.average().toFloat(),
+                            x1 = parts.minOf { it.x1 },
+                            x2 = parts.maxOf { it.x2 },
+                            text = text
+                        ),
+                        group = group,
+                        direct = false,
+                        parts = length
+                    )
                 }
             }
         }
 
         val best = candidates
-            .groupBy { it.second }
+            .groupBy { it.group }
             .mapNotNull { (_, values) ->
-                values.minWithOrNull(compareBy<Pair<Line, String>> { it.first.y }.thenByDescending { it.first.x2 - it.first.x1 })
+                values.minWithOrNull(
+                    compareBy<HeaderCandidate> { it.line.y }
+                        .thenBy { if (it.direct) 0 else 1 }
+                        .thenBy { it.parts }
+                        .thenBy { it.line.x2 - it.line.x1 }
+                )
             }
-            .sortedBy { it.first.cx }
+            .sortedBy { it.line.cx }
 
         if (best.isEmpty()) return emptyList()
-        val centers = best.map { it.first.cx }
+        val centers = best.map { it.line.cx }
         return best.mapIndexed { index, item ->
-            val line = item.first
-            val group = item.second
+            val line = item.line
+            val group = item.group
             val center = centers[index]
             val left = when {
                 centers.size == 1 -> (line.x1 - page.width * .08f).coerceAtLeast(page.width * .16f)
@@ -257,28 +279,43 @@ internal object MgsuGridParserCore {
         }.filter { it.right - it.left > 20f }
     }
 
-    internal fun findPairAnchors(
-        lines: List<Line>,
-        pairCenter: Float,
-        pageWidth: Float,
-        headerBottom: Float
-    ): List<PairAnchor> {
-        val tolerance = max(12f, pageWidth * .018f)
-        return lines.asSequence()
-            .filter { it.y > headerBottom }
-            .mapNotNull { line ->
-                val text = line.text.trim()
-                if (!singlePairRegex.matches(text)) return@mapNotNull null
-                if (abs(line.cx - pairCenter) > tolerance) return@mapNotNull null
-                val no = text.toIntOrNull()?.takeIf { it in 1..8 } ?: return@mapNotNull null
-                PairAnchor(no, line.y)
+    /**
+     * Finds the real "Пара" column from the repeated numeric structure itself. Some official
+     * PDFs expose the header as one merged string ("Дни Часы Пара"), while others do not
+     * expose the word at all. The pair numbers are still a stable vertical cluster.
+     */
+    private fun findPairColumn(page: Page, firstGroupLeft: Float, headerBottom: Float): PairColumn? {
+        val bucketSize = max(2.5f, page.width * .004f)
+        val candidates = page.glyphs.asSequence()
+            .filter { it.y > headerBottom && it.cx < firstGroupLeft }
+            .mapNotNull { glyph ->
+                val value = glyph.text.trim()
+                if (!singlePairRegex.matches(value)) return@mapNotNull null
+                val no = value.toIntOrNull()?.takeIf { it in 1..8 } ?: return@mapNotNull null
+                PairGlyph(no, glyph.y, glyph.cx)
             }
-            .sortedBy { it.y }
-            .fold(mutableListOf()) { acc, next ->
-                val duplicate = acc.lastOrNull()?.let { abs(it.y - next.y) < 3.5f && it.pairNo == next.pairNo } == true
-                if (!duplicate) acc += next
-                acc
+            .groupBy { (it.x / bucketSize).roundToInt() }
+
+        data class Scored(val center: Float, val cycles: List<List<PairAnchor>>, val score: Int)
+
+        return candidates.values.mapNotNull { cluster ->
+            val ordered = cluster.sortedBy { it.y }
+            val anchors = mutableListOf<PairAnchor>()
+            for (item in ordered) {
+                val duplicate = anchors.lastOrNull()?.let {
+                    it.pairNo == item.pairNo && abs(it.y - item.y) < 3.5f
+                } == true
+                if (!duplicate) anchors += PairAnchor(item.pairNo, item.y)
             }
+            val cycles = splitPairCycles(anchors)
+            if (cycles.isEmpty()) return@mapNotNull null
+            val strongCycles = cycles.count { cycle ->
+                cycle.size >= 5 && cycle.zipWithNext().all { (a, b) -> b.pairNo == a.pairNo + 1 }
+            }
+            val distinct = anchors.map { it.pairNo }.distinct().size
+            val score = strongCycles * 10000 + cycles.size * 1000 + distinct * 100 + anchors.size
+            Scored(cluster.map { it.x }.average().toFloat(), cycles, score)
+        }.maxByOrNull { it.score }?.let { PairColumn(it.center, it.cycles) }
     }
 
     internal fun splitPairCycles(anchors: List<PairAnchor>): List<List<PairAnchor>> {
@@ -295,7 +332,9 @@ internal object MgsuGridParserCore {
         return cycles
             .map { it.toList() }
             .filter { cycle ->
-                cycle.size >= 3 && cycle.zipWithNext().all { (a, b) -> b.pairNo > a.pairNo }
+                // The dedicated pair column is structural: rows must advance 1→2→3... .
+                // Random digits from time/specialty text cannot form a valid day cycle.
+                cycle.size >= 3 && cycle.zipWithNext().all { (a, b) -> b.pairNo == a.pairNo + 1 }
             }
     }
 
