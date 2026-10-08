@@ -90,7 +90,9 @@ class MgsuRepository(private val context: Context) {
             }
 
             suspend fun parse(sources: List<Source>): List<ScheduleEvent> {
-                val parser = PdfScheduleParser(profile)
+                // Parser v9 is a complete structural rewrite. The legacy PdfScheduleParser remains
+                // in the repository only for rollback/reference and is no longer used at runtime.
+                val parser = GridPdfScheduleParser(profile)
                 val events = mutableListOf<ScheduleEvent>()
                 val seenDigests = mutableSetOf<String>()
                 for (source in sources.take(MAX_EXACT_SOURCES)) {
@@ -241,13 +243,17 @@ class MgsuRepository(private val context: Context) {
         return "$kind · ${url.substringAfterLast('/')}"
     }
 
-    /** Guard against a broken table boundary producing implausibly many rows for one student. */
+    /**
+     * One structural weekly table cannot contain more than the eight official MGSU pair slots
+     * for a student on one weekday. Reject anything beyond that instead of ever showing a
+     * fabricated late-evening lesson.
+     */
     private fun schedulePlausibilityError(events: List<ScheduleEvent>): String? {
         if (events.isEmpty()) return null
         val worstWeekday = events.filter { it.exactDate == null }.groupingBy { it.weekday }.eachCount().values.maxOrNull() ?: 0
         val worstDate = events.mapNotNull { e -> e.exactDate?.let { it to e } }
             .groupingBy { it.first }.eachCount().values.maxOrNull() ?: 0
-        return if (worstWeekday > 14 || worstDate > 14 || events.size > 180) {
+        return if (worstWeekday > 8 || worstDate > 14 || events.size > 180) {
             "Формат PDF МГСУ изменился: распознано неправдоподобно много занятий. Старый кэш сохранён."
         } else null
     }
