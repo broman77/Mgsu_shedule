@@ -41,6 +41,30 @@ class MgsuGridParserCoreTest {
     }
 
     @Test
+    fun `actual grid rules bound the exact group cell instead of text midpoints`() {
+        val column = MgsuGridParserCore.Column(
+            group = "ИАГ 1-41",
+            header = "ИАГ 1к 41",
+            center = 250f,
+            left = 200f,
+            right = 300f,
+            headerY = 40f
+        )
+        val rules = listOf(
+            MgsuGridParserCore.Rule(180f, 100f, 320f, 100f),
+            MgsuGridParserCore.Rule(180f, 130f, 320f, 130f),
+            MgsuGridParserCore.Rule(180f, 160f, 320f, 160f),
+            // A neighboring column's line must not affect this group's cell bounds.
+            MgsuGridParserCore.Rule(20f, 118f, 150f, 118f)
+        )
+
+        assertEquals(100f to 130f, MgsuGridParserCore.gridCellBounds(rules, column, 112f, 90f, 170f))
+        assertEquals(130f to 160f, MgsuGridParserCore.gridCellBounds(rules, column, 142f, 90f, 170f))
+        assertTrue(MgsuGridParserCore.hasHorizontalGrid(rules, column, 90f, 170f))
+        assertEquals(null, MgsuGridParserCore.gridCellBounds(rules, column, 175f, 90f, 170f))
+    }
+
+    @Test
     fun `synthetic IAG 1-41 Monday stops at 13-00`() {
         val glyphs = mutableListOf<MgsuGridParserCore.Glyph>()
         fun add(x: Float, y: Float, text: String, width: Float = 12f) {
