@@ -31,11 +31,21 @@ internal object MgsuGridParserCore {
         val cx: Float get() = x + width / 2f
     }
 
+    data class Rule(val x1: Float, val y1: Float, val x2: Float, val y2: Float) {
+        val left: Float get() = minOf(x1, x2)
+        val right: Float get() = maxOf(x1, x2)
+        val top: Float get() = minOf(y1, y2)
+        val bottom: Float get() = maxOf(y1, y2)
+        val isHorizontal: Boolean get() = kotlin.math.abs(y2 - y1) <= 2.2f
+        val isVertical: Boolean get() = kotlin.math.abs(x2 - x1) <= 2.2f
+    }
+
     data class Page(
         val number: Int,
         val width: Float,
         val height: Float,
-        val glyphs: List<Glyph>
+        val glyphs: List<Glyph>,
+        val rules: List<Rule> = emptyList()
     )
 
     data class Line(
@@ -100,8 +110,21 @@ internal object MgsuGridParserCore {
             for (i in anchorsInDay.indices) {
                 val anchor = anchorsInDay[i]
                 val range = ScheduleParsingRules.officialPairTimes[anchor.pairNo] ?: continue
-                val top = if (i == 0) cycle.top else (anchorsInDay[i - 1].y + anchor.y) / 2f
-                val bottom = if (i == anchorsInDay.lastIndex) cycle.bottom else (anchor.y + anchorsInDay[i + 1].y) / 2f
+                // Prefer the actual horizontal rules enclosing this group's cell. Text-only
+                // midpoint bands are a last resort only for PDFs with no usable grid at all.
+                // When the PDF has a grid but a particular row cannot be bounded, skip it rather
+                // than pulling neighboring-row text into an empty pair.
+                val fallbackTop = if (i == 0) cycle.top else (anchorsInDay[i - 1].y + anchor.y) / 2f
+                val fallbackBottom = if (i == anchorsInDay.lastIndex) cycle.bottom else (anchor.y + anchorsInDay[i + 1].y) / 2f
+                val gridBounds = gridCellBounds(page.rules, column, anchor.y, cycle.top, cycle.bottom)
+                val hasGridForColumn = hasHorizontalGrid(page.rules, column, cycle.top, cycle.bottom)
+                val bounds = when {
+                    gridBounds != null -> gridBounds
+                    hasGridForColumn -> null
+                    else -> fallbackTop to fallbackBottom
+                } ?: continue
+                val top = bounds.first
+                val bottom = bounds.second
                 if (bottom <= top + 2f) continue
 
                 val cellLines = extractCellLines(page.glyphs, column.left, column.right, top, bottom)
@@ -372,6 +395,53 @@ internal object MgsuGridParserCore {
             }
             DayCycle(explicitDays[index], cycle, top, bottom)
         }.filter { it.bottom > it.top + 10f }
+    }
+
+    internal fun hasHorizontalGrid(
+        rules: List<Rule>,
+        column: Column,
+        top: Float,
+        bottom: Float
+    ): Boolean = rules.any { rule ->
+        rule.isHorizontal &&
+            rule.left <= column.center + 2f &&
+            rule.right >= column.center - 2f &&
+            rule.top >= top - 4f &&
+            rule.top <= bottom + 4f &&
+            rule.right - rule.left >= 12f
+    }
+
+    internal fun gridCellBounds(
+        rules: List<Rule>,
+        column: Column,
+        anchorY: Float,
+        dayTop: Float,
+        dayBottom: Float
+    ): Pair<Float, Float>? {
+        val horizontal = rules.asSequence()
+            .filter { rule ->
+                rule.isHorizontal &&
+                    rule.left <= column.center + 2f &&
+                    rule.right >= column.center - 2f &&
+                    rule.right - rule.left >= 12f &&
+                    rule.top >= dayTop - 4f &&
+                    rule.top <= dayBottom + 4f
+            }
+            .map { it.top.coerceIn(0f, Float.MAX_VALUE) }
+            .distinctBy { (it * 2f).roundToInt() }
+            .sorted()
+            .toList()
+        if (horizontal.size < 2) return null
+
+        // Select the adjacent grid segment containing the pair-number anchor. Do not infer a
+        // boundary from neighboring text: horizontal rules are the authoritative cell edges.
+        val candidates = horizontal.zipWithNext()
+            .filter { (top, bottom) -> bottom - top in 10f..220f }
+            .filter { (top, bottom) -> anchorY >= top - 5f && anchorY <= bottom + 5f }
+        val selected = candidates.minByOrNull { (top, bottom) ->
+            kotlin.math.abs(anchorY - (top + bottom) / 2f)
+        } ?: return null
+        return selected.first to selected.second
     }
 
     internal fun extractCellLines(
