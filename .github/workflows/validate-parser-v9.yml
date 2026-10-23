@@ -27,6 +27,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Compile parser and tests before external downloads
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gradle :app:compileDebugKotlin :app:compileDebugUnitTestKotlin --stacktrace --console=plain --no-daemon
+
       - name: Download current official MGSU PDFs
         shell: bash
         run: |
