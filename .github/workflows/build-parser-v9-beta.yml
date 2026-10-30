@@ -1,0 +1,53 @@
+name: Parser v9 beta APK (offline verified)
+
+on:
+  push:
+    branches: [ "rewrite/parser-v9-from-scratch" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parser-v9-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+      - name: Run all offline unit tests
+        run: gradle :app:testDebugUnitTest --stacktrace --console=plain --no-daemon
+      - name: Build signed debug APK
+        run: |
+          gradle :app:assembleDebug --stacktrace --console=plain --no-daemon
+          test -s app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload APK for installation
+        uses: actions/upload-artifact@v4
+        with:
+          name: MGSU-Schedule-v9-beta-unverified-live-PDF
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-v9-offline-test-reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
