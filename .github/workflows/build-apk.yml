@@ -3,7 +3,7 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "rewrite/parser-v9-from-scratch" ]
 
 permissions:
   contents: read
@@ -58,7 +58,7 @@ jobs:
           test -s app/src/main/res/drawable-nodpi/official_mgsu_logo.png
           file app/src/main/res/drawable-nodpi/official_mgsu_logo.png | grep -qi 'PNG image'
           grep -q 'versionName = "0.1.0-beta"' app/build.gradle.kts
-          grep -q 'versionCode = 13' app/build.gradle.kts
+          grep -Eq 'versionCode = (13|14)' app/build.gradle.kts
 
       # APK compilation is the primary gate. If Kotlin/Android code is broken, this step fails
       # and the error is visible directly instead of being hidden behind a test failure.
