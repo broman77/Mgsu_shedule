@@ -58,6 +58,11 @@ class LiveMgsuGridParserTest {
         assertTrue("ИАГ 1-41: parser returned no lessons", events.isNotEmpty())
         val monday = events.filter { it.weekday == 1 }.sortedBy { it.startTime }
         assertTrue("ИАГ 1-41: Monday is empty", monday.isNotEmpty())
+        assertEquals(
+            "ИАГ 1-41: occupied Monday pair slots differ from the official reference",
+            listOf("08:30", "10:00", "13:00"),
+            monday.map { it.startTime }.distinct()
+        )
         assertEquals("ИАГ 1-41: wrong final Monday pair", "13:00", monday.last().startTime)
         assertFalse("ИАГ 1-41: false late Monday lesson", monday.any { it.startTime in setOf("14:30", "16:00", "18:10", "19:40") })
     }
