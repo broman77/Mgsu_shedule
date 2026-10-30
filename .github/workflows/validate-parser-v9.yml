@@ -39,35 +39,41 @@ jobs:
           set -euxo pipefail
           gradle :app:testDebugUnitTest --stacktrace --console=plain --no-daemon
 
-      - name: Download current official MGSU PDFs
+      - name: Download official MGSU regression PDFs with fallback names
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p live-pdfs
           base_path="/student/Raspisanie_zanyatii_i_ekzamenov/fayly-raspisaniya-dlya-skachivaniya"
+          hosts=(www-20.mgsu.ru mgsu.ru www.mgsu.ru iges.mgsu.ru)
           fetch_pdf() {
-            local file="$1"; shift
-            for host in "$@"; do
-              url="https://${host}${base_path}/${file}"
-              echo "Trying ${url}"
-              if curl -fL --retry 2 --connect-timeout 15 --max-time 90 \
-                -A 'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Safari/537.36' \
-                -e "https://${host}${base_path}/" "$url" -o "live-pdfs/${file}"; then
-                if head -c 4 "live-pdfs/${file}" | grep -q '%PDF'; then
-                  echo "Downloaded ${file} from ${host}"
-                  return 0
+            local output="$1"; shift
+            local candidate host encoded url
+            for candidate in "$@"; do
+              encoded="${candidate// /%20}"
+              for host in "${hosts[@]}"; do
+                url="https://${host}${base_path}/${encoded}"
+                echo "Trying ${url}"
+                if curl --silent --show-error --fail --location --connect-timeout 7 --max-time 18 \
+                  -A 'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Safari/537.36' \
+                  -e "https://${host}${base_path}/" "$url" -o "live-pdfs/${output}"; then
+                  if head -c 4 "live-pdfs/${output}" | grep -q '%PDF'; then
+                    echo "Official PDF ${output} fetched as ${candidate} from ${host}"
+                    return 0
+                  fi
                 fi
-              fi
-              rm -f "live-pdfs/${file}"
+                rm -f "live-pdfs/${output}"
+              done
             done
-            echo "Could not download ${file}" >&2
+            echo "Official PDF not accessible: ${output}; live verification cannot pass" >&2
             return 1
           }
-          hosts=(mgsu.ru www.mgsu.ru iiesm.mgsu.ru www-20.mgsu.ru)
-          fetch_pdf IPGSb_1k_0610.pdf "${hosts[@]}"
-          fetch_pdf IGES_1k.pdf "${hosts[@]}"
-          fetch_pdf IIESM_1k_0210.pdf "${hosts[@]}"
-          fetch_pdf IAG_1k_0826_20.pdf "${hosts[@]}"
+          # Alternate filenames are official university PDFs indexed in 2026; the original
+          # filenames are retained to cover older regression schedules when still hosted.
+          fetch_pdf IPGSb_1k_0610.pdf "IPGSb 1k.pdf" "IPGSb 1k 1602_02.pdf" "IPGSb_1k_0610.pdf"
+          fetch_pdf IGES_1k.pdf "IGES_bs_1K.pdf" "IGES_1k.pdf"
+          fetch_pdf IIESM_1k_0210.pdf "IIESM 1k.pdf" "IIESM_1K_0210.pdf" "IIESM_1k_0210.pdf"
+          fetch_pdf IAG_1k_0826_20.pdf "IAG_1k_2026_6.pdf" "IAG_1k_0826_20.pdf"
           ls -lh live-pdfs
 
       - name: Extract independent table-rule fixtures
