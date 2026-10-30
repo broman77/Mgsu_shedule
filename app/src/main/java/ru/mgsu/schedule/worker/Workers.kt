@@ -1,6 +1,7 @@
 package ru.mgsu.schedule.worker
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -125,6 +126,7 @@ object NotificationHelper {
         notify(context, "tomorrow", "Расписание на завтра", title, text, date.toEpochDay().toInt())
     }
 
+    @SuppressLint("MissingPermission") // Permission is checked immediately below and SecurityException is handled.
     private fun notify(context: Context, channelId: String, channelName: String, title: String, text: String, id: Int) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_DEFAULT))
@@ -138,9 +140,15 @@ object NotificationHelper {
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(context).notify(id, notification)
+        if (!canNotify(context)) return
+        try {
+            NotificationManagerCompat.from(context).notify(id, notification)
+        } catch (_: SecurityException) {
+            // Permission may have been revoked after the initial check.
+        }
     }
 
+    @SuppressLint("MissingPermission") // Permission is checked immediately below and SecurityException is handled.
     private fun notifyInbox(context: Context, channelId: String, channelName: String, title: String, text: String, lines: List<String>, id: Int) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_DEFAULT))
@@ -158,7 +166,12 @@ object NotificationHelper {
             .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(context).notify(id, notification)
+        if (!canNotify(context)) return
+        try {
+            NotificationManagerCompat.from(context).notify(id, notification)
+        } catch (_: SecurityException) {
+            // Permission may have been revoked after the initial check.
+        }
     }
 
     private fun openAppIntent(context: Context, requestCode: Int): PendingIntent {
