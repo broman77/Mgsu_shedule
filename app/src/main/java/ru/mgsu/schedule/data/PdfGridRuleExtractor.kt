@@ -22,7 +22,9 @@ internal class PdfGridRuleExtractor(private val page: PDPage) : PDFGraphicsStrea
     fun extract(): List<MgsuGridParserCore.Rule> {
         processPage(page)
         return rules
-            .filter { it.length >= 8f }
+            .filter { rule ->
+                kotlin.math.hypot((rule.x2 - rule.x1).toDouble(), (rule.y2 - rule.y1).toDouble()) >= 8.0
+            }
             .distinctBy {
                 listOf(it.x1, it.y1, it.x2, it.y2).joinToString(":") { value ->
                     (value * 2f).toInt().toString()
