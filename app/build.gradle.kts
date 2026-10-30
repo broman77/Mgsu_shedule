@@ -15,7 +15,7 @@ android {
         targetSdk = 35
         // The public version is intentionally reset to beta 0.1.0.
         // Internal versionCode advances for installability; public version remains beta 0.1.0.
-        versionCode = 13
+        versionCode = 14
         versionName = "0.1.0-beta"
     }
 
