@@ -33,6 +33,12 @@ jobs:
           set -euxo pipefail
           gradle :app:compileDebugKotlin :app:compileDebugUnitTestKotlin --stacktrace --console=plain --no-daemon
 
+      - name: Run deterministic parser regression tests (offline)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gradle :app:testDebugUnitTest --stacktrace --console=plain --no-daemon
+
       - name: Download current official MGSU PDFs
         shell: bash
         run: |
